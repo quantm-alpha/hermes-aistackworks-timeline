@@ -2,8 +2,8 @@
 
 Builds the ``timeline.append`` payload and POSTs it to the agent-host daemon over
 its host Unix socket (mounted into the container at ``/run/aistackworks``). The
-daemon relays the event to Mission Control over its existing outbound WebSocket —
-there is no direct Hermes→MC network call.
+daemon relays the event to AIStackWorks over its existing outbound WebSocket —
+there is no direct Hermes→AIStackWorks network call.
 
 Transport uses the stdlib only (a raw HTTP/1.1 request over an ``AF_UNIX``
 socket), so it has no dependency on the gateway venv's package set and cannot be
@@ -25,7 +25,7 @@ from .identity import current
 # launcher already exports. Env override kept for parity with the daemon flag.
 _SOCK = os.environ.get("AGENT_EVENT_SOCK", "/run/aistackworks/agent.sock")
 _TIMEOUT_S = 5.0
-# Demo recordings are larger and the relay hop to MC is slower, so give the
+# Demo recordings are larger and the relay hop to AIStackWorks is slower, so give the
 # media upload its own (longer) timeout.
 _MEDIA_TIMEOUT_S = 60.0
 
@@ -48,11 +48,11 @@ class _UDSConnection(http.client.HTTPConnection):
 
 def _upload_asset(sock_path: str, card_id: str, event_key: str, asset_path: str,
                   timeout: float) -> str | None:
-    """Upload ``asset_path`` to MC via the daemon UDS; return the hosted URL.
+    """Upload ``asset_path`` to AIStackWorks via the daemon UDS; return the hosted URL.
 
     POSTs the raw bytes to ``/v1/agent-media`` with the card identity, the
     inferred content type, and the filename in headers (the daemon wraps it as
-    multipart for MC and adds the MC bearer). Returns the ``url`` MC assigns, or
+    multipart for AIStackWorks and adds the AIStackWorks bearer). Returns the ``url`` AIStackWorks assigns, or
     ``None`` on any failure (best-effort by contract)."""
     try:
         with open(asset_path, "rb") as fh:
@@ -137,14 +137,14 @@ def report_progress(args: dict, **_kwargs) -> str:
     # ``current()`` is correct for it, but the coder/reviewer/ship steps run as
     # separate Kanban tasks whose session id is the task id — NOT
     # ``card-<notion_page_id>``. Those skills read the card_id from their task
-    # body and pass it here so the event resolves to the right card in MC.
+    # body and pass it here so the event resolves to the right card in AIStackWorks.
     ident_card, ident_session = current()
     card_id = (args.get("card_id") or "").strip() or ident_card
     if not card_id:
-        # No dispatch identity captured (e.g. invoked outside an MC dispatch).
+        # No dispatch identity captured (e.g. invoked outside an AIStackWorks dispatch).
         return json.dumps({"ok": False, "reason": "no card identity for this session"})
-    # ``session_id`` is stored/displayed by MC; keep the session-derived id when
-    # present (the task id for workers) for traceability. The ``event_key`` MC
+    # ``session_id`` is stored/displayed by AIStackWorks; keep the session-derived id when
+    # present (the task id for workers) for traceability. The ``event_key`` AIStackWorks
     # dedups on, however, is **canonical card-based** so a skill's live call and
     # the worker-exit backstop produce the SAME key for a given
     # (card, skill, iter, status) and never double-post.
@@ -160,12 +160,12 @@ def report_progress(args: dict, **_kwargs) -> str:
     it = args.get("iter")
     iter_part = "" if it is None else str(it)
     # Canonical card-based event_key so a skill's live call and the worker-exit
-    # backstop produce the SAME key for one (card, skill, iter, status) and MC
+    # backstop produce the SAME key for one (card, skill, iter, status) and AIStackWorks
     # dedups them (it is also the asset upload's X-Event-Key below).
     event_key = f"{event_session}:{skill}:{iter_part}:{status}"
 
     artifact = args.get("artifact")
-    # Produced asset (e.g. a /demo recording): upload it to MC via the daemon and
+    # Produced asset (e.g. a /demo recording): upload it to AIStackWorks via the daemon and
     # point the timeline artifact at the hosted URL (videos play inline). Keep
     # the caller's artifact kind/label; only fill the href. Best-effort — a
     # failed upload leaves the passed artifact untouched and never blocks the event.

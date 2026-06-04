@@ -6,8 +6,8 @@ description: >-
 # `standalone` (the default) — this plugin provides an agent TOOL
 # (report_progress) + session hooks. `platform` is for gateway messaging
 # adapters (Telegram/Discord/IRC) and does NOT expose provides_tools to agent
-# sessions, so coder/reviewer/ship never saw report_progress (E2E finding,
-# 2026-06-04): the tool must be `standalone` to register in worker sessions.
+# sessions, so worker sessions never expose report_progress. The tool must be
+# `standalone` to register in agent (worker) sessions.
 kind: standalone
 author: AIStackWorks
 provides_tools:

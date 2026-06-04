@@ -3,8 +3,7 @@
 No Hermes runtime required — exercises identity capture, payload shape and the
 real Unix-socket transport against a throwaway in-process daemon.
 
-Run:  python -m unittest containerization.hermes.plugins.aistackworks-timeline.test_plugin
-  or: cd containerization/hermes/plugins/aistackworks-timeline && python -m unittest test_plugin
+Run:  python -m unittest test_plugin
 """
 from __future__ import annotations
 
@@ -183,7 +182,7 @@ class ReportProgressTests(unittest.TestCase):
     def test_explicit_card_id_overrides_subtask_session(self):
         # Coder/reviewer/ship run as spawned Kanban tasks whose session id is the
         # task id, NOT card-<notion_page_id>. The explicit card_id arg must win so
-        # the event still resolves to the right card in MC.
+        # the event still resolves to the right card in AIStackWorks.
         identity.remember("kanban-task-7e3f")
         result = json.loads(
             tools.report_progress(
@@ -202,7 +201,7 @@ class ReportProgressTests(unittest.TestCase):
         self.assertEqual(sent["card_id"], "deadbeef")
         # session_id stays the subtask's own (for traceability)…
         self.assertEqual(sent["session_id"], "kanban-task-7e3f")
-        # …but the event_key MC dedups on is CANONICAL card-based, so a skill's
+        # …but the event_key AIStackWorks dedups on is CANONICAL card-based, so a skill's
         # live call and the worker-exit backstop produce the same key for one
         # (card, skill, iter, status) and never double-post the milestone.
         self.assertEqual(sent["event_key"], "card-deadbeef:build:1:ready_for_test")
@@ -279,9 +278,9 @@ class KanbanIdentityTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.db = os.path.join(self.tmp, "kanban.db")
         _make_kanban_db(self.db, [
-            ("t_coder", "E2E: add tagline", "card_id: e2ecard0001\n\nCard title: ...",
+            ("t_coder", "Add tagline", "card_id: card0001\n\nCard title: ...",
              '["build", "test", "demo"]'),
-            ("t_ship", "Ship: E2E: add tagline", "card_id: e2ecard0001\n\nRun /ship...", None),
+            ("t_ship", "Ship: Add tagline", "card_id: card0001\n\nRun /ship...", None),
         ])
         self._env = {k: os.environ.get(k) for k in ("HERMES_KANBAN_DB", "HERMES_KANBAN_TASK")}
         os.environ["HERMES_KANBAN_DB"] = self.db
@@ -295,14 +294,14 @@ class KanbanIdentityTests(unittest.TestCase):
 
     def test_read_task_parses_card_id_and_skills(self):
         meta = identity.read_task("t_coder")
-        self.assertEqual(meta["card_id"], "e2ecard0001")
+        self.assertEqual(meta["card_id"], "card0001")
         self.assertEqual(meta["skills"], ["build", "test", "demo"])
 
     def test_worker_session_resolves_card_from_task_body(self):
         os.environ["HERMES_KANBAN_TASK"] = "t_coder"
         identity.remember("t_coder")  # session id is the task id, NOT card-<id>
         card, session = identity.current()
-        self.assertEqual(card, "e2ecard0001")  # from the body, not the session
+        self.assertEqual(card, "card0001")  # from the body, not the session
         self.assertEqual(session, "t_coder")
 
 
@@ -316,10 +315,10 @@ class BackstopHookTests(unittest.TestCase):
         self.db = os.path.join(self.tmp, "kanban.db")
         _make_kanban_db(self.db, [
             # (id, title, body, skills, status)
-            ("t_coder", "E2E: add tagline", "card_id: cardX\n\n...", '["build", "test", "demo"]', "running"),
-            ("t_ship", "Ship: E2E: add tagline", "card_id: cardX\n\nRun /ship...", None, "running"),
-            ("t_rev", "Review: E2E: add tagline", "card_id: cardX\n\nReview...", None, "running"),
-            ("t_blocked", "E2E: add tagline", "card_id: cardX\n\n...", '["build", "test", "demo"]', "blocked"),
+            ("t_coder", "Add tagline", "card_id: cardX\n\n...", '["build", "test", "demo"]', "running"),
+            ("t_ship", "Ship: Add tagline", "card_id: cardX\n\nRun /ship...", None, "running"),
+            ("t_rev", "Review: Add tagline", "card_id: cardX\n\nReview...", None, "running"),
+            ("t_blocked", "Add tagline", "card_id: cardX\n\n...", '["build", "test", "demo"]', "blocked"),
         ])
         self._env = {k: os.environ.get(k) for k in ("HERMES_KANBAN_DB", "HERMES_KANBAN_TASK")}
         os.environ["HERMES_KANBAN_DB"] = self.db
@@ -380,7 +379,7 @@ class BackstopHookTests(unittest.TestCase):
     def test_reviewer_task_is_not_advanced(self):
         os.environ["HERMES_KANBAN_TASK"] = "t_rev"
         plugin._on_session_finalize(session_id="t_rev")
-        self.assertEqual(self.daemon.events(), [])  # reviewer has no MC mapping
+        self.assertEqual(self.daemon.events(), [])  # reviewer has no AIStackWorks mapping
 
     def test_non_worker_session_does_not_emit(self):
         os.environ.pop("HERMES_KANBAN_TASK", None)  # main's refine dispatch, not a worker
@@ -410,7 +409,7 @@ class RichBackstopTests(unittest.TestCase):
                 "t_coder",
                 "Added a Quick Start section to README.md; PR opened, checks pass.",
                 json.dumps({
-                    "changed_files": ["README.md", ".aistackworks/cards/card-cardX.tasks.md"],
+                    "changed_files": ["README.md", "docs/quickstart.md"],
                     "branch": "feat/cardX-quick-start",
                     "pr_url": "https://github.com/o/r/pull/9",
                     # exercise the Codex {"item": [...]} wrapper + mixed casing

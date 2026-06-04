@@ -8,7 +8,7 @@ from __future__ import annotations
 REPORT_PROGRESS = {
     "name": "report_progress",
     "description": (
-        "Post a milestone event to the current card's Mission Control timeline. "
+        "Post a milestone event to the current card's AIStackWorks timeline. "
         "Call this at the end of a skill stage (refine/build/test/demo/ship) to "
         "record durable progress for the human watching the card. Best-effort: a "
         "failure here never blocks the skill. Pass the `card_id` from your task "
@@ -24,9 +24,8 @@ REPORT_PROGRESS = {
             "card_id": {
                 "type": "string",
                 "description": (
-                    "The card's id (the UUID from your task body / the "
-                    "`.aistackworks/cards/card-<card_id>.tasks.md` path). Pass it "
-                    "verbatim so Mission Control can advance the right card."
+                    "The card's id (the UUID the task was dispatched for). Pass it "
+                    "verbatim so AIStackWorks can advance the right card."
                 ),
             },
             "skill": {
@@ -38,7 +37,7 @@ REPORT_PROGRESS = {
                 "type": "string",
                 "description": (
                     "Milestone status. This drives card workflow advancement in "
-                    "Mission Control, so use the exact value your skill prescribes "
+                    "AIStackWorks, so use the exact value your skill prescribes "
                     "(e.g. refine→'awaiting_prd_review', build→'ready_for_test', "
                     "test→'awaiting_demo', demo→'pass', ship→'shipped'; 'blocked' "
                     "for any blocker)."
@@ -81,10 +80,10 @@ REPORT_PROGRESS = {
             "asset": {
                 "type": "string",
                 "description": (
-                    "Local path to a produced asset to host in Mission Control "
+                    "Local path to a produced asset to host in AIStackWorks "
                     "(e.g. the /demo recording .mp4). When set, the plugin uploads "
                     "it via the agent-host daemon and points artifact.href at the "
-                    "hosted MC URL — videos then play inline on the timeline. "
+                    "hosted AIStackWorks URL — videos then play inline on the timeline. "
                     "Best-effort: a failed upload leaves any artifact you passed "
                     "intact."
                 ),

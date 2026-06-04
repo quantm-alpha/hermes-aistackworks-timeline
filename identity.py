@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-Mission Control dispatches a card as session id ``card-<notion_page_id>``. On the
+AIStackWorks dispatches a card as session id ``card-<notion_page_id>``. On the
 agent-host relay path the daemon now sends that value as the native
 ``X-Hermes-Session-Id`` header (DISP-04), so Hermes adopts it as its own session
 id and hands it to plugin hooks. The Hermes plugin runtime passes ``session_id``

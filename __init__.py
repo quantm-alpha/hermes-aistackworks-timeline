@@ -2,9 +2,9 @@
 
 Captures the dispatched card identity from session hooks and exposes a
 ``report_progress`` tool that skills call at milestones to populate the card's
-Mission Control timeline. See ``.aistackworks/docs/hermes-timeline-plugin-design.md``.
+AIStackWorks timeline.
 
-Two layers drive the card's timeline so MC never goes blind on a stage:
+Two layers drive the card's timeline so AIStackWorks never goes blind on a stage:
 
 1. **Skill-driven (primary, granular):** build/test/demo/ship/refine call
    ``report_progress`` at each milestone — rich ``fields``/``sections``.
@@ -28,7 +28,7 @@ from . import identity, schemas, tools
 
 logger = logging.getLogger(__name__)
 
-# Terminal success status MC advances off, per skill. (reviewer has no
+# Terminal success status AIStackWorks advances off, per skill. (reviewer has no
 # EVENT_STATUS_MAP entry by design, so it is intentionally absent.)
 SKILL_SUCCESS_STATUS: dict[str, str] = {
     "refine": "awaiting_prd_review",
@@ -144,7 +144,7 @@ def _rich_event(card_id: str, skill: str, status: str, run: dict) -> dict:
 
 
 def _task_stage_skills(meta: dict) -> list[str]:
-    """Every MC-advancing stage skill this finished task covers, in stage order.
+    """Every AIStackWorks-advancing stage skill this finished task covers, in stage order.
 
     A coder task carries ``skills=[build, test, demo]`` → all three; a ship task
     has no skills list but a ``Ship:`` title → ``[ship]``; a reviewer task maps to
@@ -156,7 +156,7 @@ def _task_stage_skills(meta: dict) -> list[str]:
     title = (meta.get("title") or "").strip().lower()
     if title.startswith("ship:") or "/ship" in title:
         return ["ship"]
-    return []  # reviewer / unknown → not an MC-advancing stage
+    return []  # reviewer / unknown → not an AIStackWorks-advancing stage
 
 
 def _terminal_skill(meta: dict) -> str:
