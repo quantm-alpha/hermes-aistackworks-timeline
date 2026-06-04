@@ -1,0 +1,17 @@
+name: aistackworks-timeline
+version: 0.1.0
+description: >-
+  Emits per-card skill timeline events (refine/build/test/demo/ship) to Mission
+  Control via the agent-host daemon's Unix socket.
+# `standalone` (the default) — this plugin provides an agent TOOL
+# (report_progress) + session hooks. `platform` is for gateway messaging
+# adapters (Telegram/Discord/IRC) and does NOT expose provides_tools to agent
+# sessions, so coder/reviewer/ship never saw report_progress (E2E finding,
+# 2026-06-04): the tool must be `standalone` to register in worker sessions.
+kind: standalone
+author: AIStackWorks
+provides_tools:
+  - report_progress
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
