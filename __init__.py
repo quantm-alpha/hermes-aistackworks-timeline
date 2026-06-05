@@ -157,6 +157,12 @@ def _rich_event(card_id: str, skill: str, status: str, run: dict) -> dict:
                 demo_path = _unwrap(arts[0])
         if demo_path:
             payload["asset"] = str(demo_path)
+            # report_progress keeps the artifact KIND set here and only fills the
+            # href with the uploaded video URL. The Card Detail timeline
+            # (SkillTimeline.tsx) renders an inline <video> ONLY when
+            # kind=="demo" + href contains "/videos/" — so set a demo artifact,
+            # overriding the PR/commit one (those belong on build/ship events).
+            payload["artifact"] = {"kind": "demo", "label": "Demo recording"}
     return payload
 
 
