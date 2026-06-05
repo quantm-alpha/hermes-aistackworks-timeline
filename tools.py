@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import mimetypes
 import os
 import socket
 import threading
 
 from .identity import current
+
+_log = logging.getLogger("hermes_plugins.aistackworks_timeline")
 
 # Matches the daemon's --agent-event-sock default and the AGENT_EVENT_SOCK the
 # launcher already exports. Env override kept for parity with the daemon flag.
@@ -57,7 +60,8 @@ def _upload_asset(sock_path: str, card_id: str, event_key: str, asset_path: str,
     try:
         with open(asset_path, "rb") as fh:
             data = fh.read()
-    except OSError:
+    except OSError as exc:
+        _log.warning("demo asset unreadable, skipping upload: %s (%s)", asset_path, exc)
         return None
 
     filename = os.path.basename(asset_path) or "asset"
@@ -78,9 +82,18 @@ def _upload_asset(sock_path: str, card_id: str, event_key: str, asset_path: str,
         resp = conn.getresponse()
         raw = resp.read()
         if not 200 <= resp.status < 300:
+            _log.warning(
+                "demo asset upload failed: daemon %s POST /v1/agent-media -> HTTP %s %s "
+                "(is the daemon binary current? the route 404s on builds before the "
+                "/v1/agent-media commit)",
+                sock_path, resp.status, (raw[:200].decode("utf-8", "replace") if raw else ""),
+            )
             return None
-        return (json.loads(raw or b"{}") or {}).get("url")
-    except (OSError, ValueError):
+        url = (json.loads(raw or b"{}") or {}).get("url")
+        _log.info("demo asset uploaded -> %s", url)
+        return url
+    except (OSError, ValueError) as exc:
+        _log.warning("demo asset upload errored talking to daemon %s: %s", sock_path, exc)
         return None
     finally:
         conn.close()

@@ -140,6 +140,23 @@ def _rich_event(card_id: str, skill: str, status: str, run: dict) -> dict:
     }
     if artifact:
         payload["artifact"] = artifact
+
+    # Demo recordings: carry the .mp4 as ``asset`` so the deterministic
+    # worker-exit backstop UPLOADS it (report_progress relays an ``asset`` to the
+    # daemon /v1/agent-media → MC). The live /demo skill passes ``asset`` itself;
+    # but when the coder skips that call, the backstop is the only path — and
+    # without this it emitted the milestone yet never uploaded the video. Pull
+    # the path the /demo skill wrote to the run record (metadata.demo.path, or
+    # the first entry of metadata.artifacts).
+    if skill == "demo":
+        demo_meta = _mget(meta, "demo")
+        demo_path = demo_meta.get("path") if isinstance(demo_meta, dict) else None
+        if not demo_path:
+            arts = _mget(meta, "artifacts")
+            if isinstance(arts, (list, tuple)) and arts:
+                demo_path = _unwrap(arts[0])
+        if demo_path:
+            payload["asset"] = str(demo_path)
     return payload
 
 
