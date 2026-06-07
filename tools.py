@@ -30,6 +30,27 @@ _TIMEOUT_S = 5.0
 _MEDIA_TIMEOUT_S = 60.0
 
 
+def _sanitize_field_value(value):
+    """Coerce a field value to the shapes AIStackWorks renders cleanly: a scalar,
+    or a list of scalars. Models occasionally emit a nested object where a
+    string belongs (e.g. ``["7/7 pass", {"Commit count": "7"}]``) — flatten it
+    to ``"key: value"`` text so the timeline never shows raw JSON."""
+    if isinstance(value, dict):
+        return ", ".join(f"{k}: {v}" for k, v in value.items())
+    if isinstance(value, list):
+        return [
+            item if isinstance(item, (str, int, float, bool)) else _sanitize_field_value(item)
+            for item in value
+        ]
+    return value
+
+
+def _sanitize_fields(fields):
+    if not isinstance(fields, dict):
+        return {}
+    return {k: _sanitize_field_value(v) for k, v in fields.items()}
+
+
 class _UDSConnection(http.client.HTTPConnection):
     """``http.client`` over an ``AF_UNIX`` socket — gives us full, robust
     response parsing (status + body) for the media-upload round-trip, which the
@@ -187,7 +208,7 @@ def report_progress(args: dict, **_kwargs) -> str:
         "status": status,
         "headline": headline,
         "iter": it,
-        "fields": args.get("fields") or {},
+        "fields": _sanitize_fields(args.get("fields") or {}),
         "sections": args.get("sections") or [],
         "artifact": artifact,
         "event_key": event_key,
