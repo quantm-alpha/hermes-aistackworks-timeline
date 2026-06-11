@@ -1,14 +1,29 @@
 """``report_progress`` handler.
 
-Builds the ``timeline.append`` payload and POSTs it to the agent-host daemon over
-its host Unix socket (mounted into the container at ``/run/aistackworks``). The
-daemon relays the event to AIStackWorks over its existing outbound WebSocket —
-there is no direct Hermes→AIStackWorks network call.
+Builds the timeline event payload and emits it to AIStackWorks. The event has two
+possible transports, tried in this order:
 
-Transport uses the stdlib only (a raw HTTP/1.1 request over an ``AF_UNIX``
-socket), so it has no dependency on the gateway venv's package set and cannot be
-broken by an upstream image change. Best-effort by contract: any failure returns
-a JSON error string but never raises into the agent.
+1. **MCP (preferred):** when ``MC_MCP_URL`` and ``MC_MCP_TOKEN`` are both set in
+   the profile env, the event is POSTed as a JSON-RPC ``tools/call`` of the
+   ``report_progress`` tool to AIStackWorks' stateless streamable-HTTP MCP server.
+   This is a direct, authenticated Hermes→AIStackWorks call.
+2. **Agent-host daemon UDS (fallback):** the event is POSTed to the local
+   agent-host daemon over its host Unix socket (mounted into the container at
+   ``/run/aistackworks``); the daemon relays it to AIStackWorks over its existing
+   outbound WebSocket. This path needs no token or network egress from the agent
+   and is the fallback whenever the MCP leg is absent or fails (so an older
+   AIStackWorks deployment without the MCP tool, or a transient MCP error, never
+   loses an event relative to the UDS-only behaviour).
+
+Produced *assets* (demo recordings) always upload over the daemon UDS
+(``/v1/agent-media``) regardless of which transport carries the event — media is
+binary and does not belong on the JSON MCP leg.
+
+Transport uses the stdlib only (``urllib.request`` for MCP, a raw HTTP/1.1
+request over an ``AF_UNIX`` socket for the daemon), so it has no dependency on the
+gateway venv's package set and cannot be broken by an upstream image change.
+Best-effort by contract: any failure returns a JSON error string but never raises
+into the agent.
 """
 from __future__ import annotations
 
@@ -18,6 +33,8 @@ import mimetypes
 import os
 import socket
 import threading
+import urllib.error
+import urllib.request
 
 from .identity import current
 
@@ -28,6 +45,92 @@ _TIMEOUT_S = 5.0
 # Demo recordings are larger and the relay hop to AIStackWorks is slower, so give the
 # media upload its own (longer) timeout.
 _MEDIA_TIMEOUT_S = 60.0
+# The MCP tools/call leg has its own (network) timeout.
+_MCP_TIMEOUT_S = 10.0
+
+
+def _mcp_env() -> "tuple[str, str] | None":
+    """The ``(url, token)`` for the AIStackWorks MCP server, or ``None``.
+
+    Read fresh on every emit (not module-import) so a profile that exports
+    ``MC_MCP_URL`` / ``MC_MCP_TOKEN`` after this module loads still takes the MCP
+    path — these are the same vars the profile's ``config.yaml`` interpolates for
+    its MCP server registration. Both must be set for the MCP leg to be tried.
+    """
+    url = (os.environ.get("MC_MCP_URL") or "").strip()
+    token = (os.environ.get("MC_MCP_TOKEN") or "").strip()
+    if url and token:
+        return url, token
+    return None
+
+
+def _emit_via_mcp(url: str, token: str, payload: dict) -> bool:
+    """POST the event as a JSON-RPC ``tools/call`` to the AIStackWorks MCP server.
+
+    Sends ``report_progress`` with the MC tool's exact argument names. The server
+    synthesizes its own canonical ``event_key`` (``card-<id>:<skill>:<iter>:
+    <status>``), so ``event_key`` is intentionally NOT sent — only the UDS leg
+    carries it. Returns ``True`` only on a clean JSON-RPC result; any connection
+    error, non-2xx, malformed body, or JSON-RPC ``error`` object (incl. an older
+    deployment that lacks the tool) returns ``False`` so the caller falls back to
+    the daemon UDS path.
+    """
+    arguments = {
+        "card_id": payload["card_id"],
+        "skill": payload["skill"],
+        "status": payload["status"],
+        "headline": payload["headline"],
+        "fields": payload.get("fields") or {},
+        "sections": payload.get("sections") or [],
+        "artifact": payload.get("artifact"),
+        "session_id": payload.get("session_id"),
+    }
+    # ``iter`` is optional on the MC tool (defaults to 1); only send a real value.
+    if payload.get("iter") is not None:
+        arguments["iter"] = payload["iter"]
+
+    envelope = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "report_progress", "arguments": arguments},
+    }
+    body = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_MCP_TIMEOUT_S) as resp:
+            if not 200 <= resp.status < 300:
+                return False
+            raw = resp.read()
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+    # Stateless streamable-HTTP returns one JSON response per POST
+    # (json_response=True). Parse it and reject a JSON-RPC error object — a
+    # "method/tool not found" on an older AIStackWorks must fall back to UDS.
+    try:
+        envelope_out = json.loads(raw or b"{}")
+    except ValueError:
+        return False
+    if not isinstance(envelope_out, dict) or envelope_out.get("error"):
+        return False
+    result = envelope_out.get("result")
+    if not isinstance(result, dict):
+        return False
+    # A tool that ran but reported a tool-level error (isError) is not a success;
+    # fall back so the UDS leg still records the event.
+    if result.get("isError"):
+        return False
+    return True
 
 
 class _UDSConnection(http.client.HTTPConnection):
@@ -105,6 +208,32 @@ def already_emitted(card_id: str, skill: str) -> bool:
 def reset_emitted() -> None:
     with _emitted_lock:
         _emitted.clear()
+
+
+def _emit_event(payload: dict) -> dict:
+    """Emit a built timeline event, MCP-first with a UDS fallback.
+
+    Tries the AIStackWorks MCP ``report_progress`` tools/call when ``MC_MCP_URL`` +
+    ``MC_MCP_TOKEN`` are set; on ANY MCP failure (or when the env is absent) falls
+    back to the daemon UDS ``/v1/agent-event`` POST, so no event is ever lost
+    relative to the UDS-only behaviour. Returns the model-facing result dict
+    (``ok``, ``transport``, plus per-transport detail). Best-effort: never raises.
+    """
+    mcp = _mcp_env()
+    if mcp is not None:
+        url, token = mcp
+        if _emit_via_mcp(url, token, payload):
+            return {"ok": True, "transport": "mcp", "event_key": payload["event_key"]}
+        # MCP failed (unreachable, non-2xx, JSON-RPC error, or tool absent on an
+        # older AIStackWorks) — fall through to the daemon UDS leg.
+
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    try:
+        code = _post_uds(_SOCK, "/v1/agent-event", body, _TIMEOUT_S)
+    except OSError as exc:
+        return {"ok": False, "transport": "uds", "reason": f"daemon unreachable: {exc}"}
+    ok = 200 <= code < 300
+    return {"ok": ok, "transport": "uds", "status": code, "event_key": payload["event_key"]}
 
 
 def _post_uds(sock_path: str, path: str, body: bytes, timeout: float) -> int:
@@ -190,16 +319,12 @@ def report_progress(args: dict, **_kwargs) -> str:
         "fields": args.get("fields") or {},
         "sections": args.get("sections") or [],
         "artifact": artifact,
+        # event_key is carried by the UDS leg only; the MCP server synthesizes its
+        # own (same formula), so _emit_via_mcp drops it from the tools/call args.
         "event_key": event_key,
     }
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
-    try:
-        code = _post_uds(_SOCK, "/v1/agent-event", body, _TIMEOUT_S)
-    except OSError as exc:
-        return json.dumps({"ok": False, "reason": f"daemon unreachable: {exc}"})
-
-    ok = 200 <= code < 300
-    if ok:
+    result = _emit_event(payload)
+    if result.get("ok"):
         mark_emitted(card_id, skill)
-    return json.dumps({"ok": ok, "status": code, "event_key": payload["event_key"]})
+    return json.dumps(result)
