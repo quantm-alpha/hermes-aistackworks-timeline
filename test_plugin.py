@@ -229,7 +229,9 @@ class ReportProgressTests(_NoMcpEnvMixin, unittest.TestCase):
 
     def test_explicit_card_id_synthesizes_session_when_no_identity(self):
         # No session identity captured at all (hook never fired): synthesize the
-        # canonical card-<id> session so the event_key stays well-formed.
+        # canonical card-<id> session so the event_key stays well-formed. An
+        # omitted iter normalizes to 1 (the MC tool's default) so both transports
+        # always compute the identical key.
         identity._current["card_id"] = ""
         identity._current["session_id"] = ""
         result = json.loads(
@@ -242,7 +244,8 @@ class ReportProgressTests(_NoMcpEnvMixin, unittest.TestCase):
         sent = json.loads(self.daemon.captured)
         self.assertEqual(sent["card_id"], "cafe1234")
         self.assertEqual(sent["session_id"], "card-cafe1234")
-        self.assertEqual(sent["event_key"], "card-cafe1234:ship::shipped")
+        self.assertEqual(sent["event_key"], "card-cafe1234:ship:1:shipped")
+        self.assertEqual(sent["iter"], 1)
 
     def test_missing_identity_is_a_noop(self):
         # Reset identity to empty.
@@ -483,7 +486,7 @@ class RichBackstopTests(_NoMcpEnvMixin, unittest.TestCase):
         self.assertIn("README.md", sent["fields"]["FILES"])
         self.assertEqual(sent["artifact"]["kind"], "pr")
         # Canonical card-based event_key → dedups with a skill's live tool call.
-        self.assertEqual(sent["event_key"], "card-cardX:demo::done")
+        self.assertEqual(sent["event_key"], "card-cardX:demo:1:done")
 
 
 class _RoutingDaemon:
@@ -592,9 +595,9 @@ class AssetUploadTests(_NoMcpEnvMixin, unittest.TestCase):
         self.assertEqual(self.daemon.bodies["/v1/agent-media"], self.asset_bytes)
         media_headers = self.daemon.headers["/v1/agent-media"]
         self.assertEqual(media_headers["x-card-id"], "deadbeef")
-        # Canonical card-based event_key (this branch unifies it across tool +
-        # CLI + backstop), which is what the asset upload tags the media with.
-        self.assertEqual(media_headers["x-event-key"], "card-deadbeef:demo::pass")
+        # Canonical card-based event_key (unified across tool + CLI + backstop,
+        # omitted iter normalized to 1), which the asset upload tags the media with.
+        self.assertEqual(media_headers["x-event-key"], "card-deadbeef:demo:1:pass")
         self.assertEqual(media_headers["x-filename"], "page@abc.mp4")
         self.assertEqual(media_headers["content-type"], "video/mp4")
         # The emitted timeline event points the artifact at the hosted URL.
@@ -762,11 +765,34 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(server.last_auth, "Bearer tok-abc")
         self.assertIn("text/event-stream", server.last_accept)
 
-    def test_mcp_omits_iter_when_absent(self):
+    def test_omitted_iter_defaults_to_1_on_both_legs(self):
+        # An omitted iter is normalized to 1 (the MC tool's default) BEFORE the
+        # transport split, so the MCP args carry iter=1 explicitly and the local
+        # event_key (the one a UDS fallback would send) is the byte-identical key
+        # the server synthesizes — a lost-response MCP write followed by the UDS
+        # fallback dedups instead of duplicating.
         server = _FakeMcpServer(mode="ok")
         self._set_mcp(server)
-        tools.report_progress({"skill": "ship", "status": "done", "headline": "Shipped"})
-        self.assertNotIn("iter", server.last_envelope["params"]["arguments"])
+        result = json.loads(
+            tools.report_progress({"skill": "ship", "status": "done", "headline": "Shipped"})
+        )
+        args = server.last_envelope["params"]["arguments"]
+        self.assertEqual(args["iter"], 1)
+        # Locally computed key == the server-side formula card-<id>:<skill>:<iter>:<status>.
+        server_key = f"card-{args['card_id']}:{args['skill']}:{args['iter']}:{args['status']}"
+        self.assertEqual(result["event_key"], server_key)
+        self.assertEqual(result["event_key"], "card-deadbeef:ship:1:done")
+
+    def test_explicit_iter_produces_identical_keys_on_both_legs(self):
+        server = _FakeMcpServer(mode="ok")
+        self._set_mcp(server)
+        result = json.loads(tools.report_progress(
+            {"skill": "build", "status": "done", "headline": "x", "iter": 4}
+        ))
+        args = server.last_envelope["params"]["arguments"]
+        server_key = f"card-{args['card_id']}:{args['skill']}:{args['iter']}:{args['status']}"
+        self.assertEqual(result["event_key"], server_key)
+        self.assertEqual(result["event_key"], "card-deadbeef:build:4:done")
 
     def test_rpc_error_falls_back_to_uds(self):
         # Older AIStackWorks without the tool → JSON-RPC error → UDS fallback.

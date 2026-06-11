@@ -80,14 +80,15 @@ def _emit_via_mcp(url: str, token: str, payload: dict) -> bool:
         "skill": payload["skill"],
         "status": payload["status"],
         "headline": payload["headline"],
+        # Always sent explicitly (report_progress normalized it, defaulting to 1
+        # like the MC tool) so the server-synthesized event_key is byte-identical
+        # to the locally computed one the UDS fallback would carry.
+        "iter": payload["iter"],
         "fields": payload.get("fields") or {},
         "sections": payload.get("sections") or [],
         "artifact": payload.get("artifact"),
         "session_id": payload.get("session_id"),
     }
-    # ``iter`` is optional on the MC tool (defaults to 1); only send a real value.
-    if payload.get("iter") is not None:
-        arguments["iter"] = payload["iter"]
 
     envelope = {
         "jsonrpc": "2.0",
@@ -286,12 +287,20 @@ def report_progress(args: dict, **_kwargs) -> str:
     if not skill or not status or not headline:
         return json.dumps({"ok": False, "reason": "skill, status and headline are required"})
 
-    it = args.get("iter")
-    iter_part = "" if it is None else str(it)
+    # Normalize ``iter`` exactly as the MC MCP tool does (missing/invalid → 1) so
+    # BOTH transports always compute the IDENTICAL canonical event_key for
+    # identical inputs. This matters for dedup across legs: if an MCP POST
+    # persists server-side but its response is lost (timeout/reset after write),
+    # the UDS fallback re-emits the event — the keys MUST match or AIStackWorks
+    # records a duplicate TimelineEvent.
+    try:
+        it = int(args["iter"]) if args.get("iter") is not None else 1
+    except (TypeError, ValueError):
+        it = 1
     # Canonical card-based event_key so a skill's live call and the worker-exit
     # backstop produce the SAME key for one (card, skill, iter, status) and AIStackWorks
     # dedups them (it is also the asset upload's X-Event-Key below).
-    event_key = f"{event_session}:{skill}:{iter_part}:{status}"
+    event_key = f"{event_session}:{skill}:{it}:{status}"
 
     artifact = args.get("artifact")
     # Produced asset (e.g. a /demo recording): upload it to AIStackWorks via the daemon and
