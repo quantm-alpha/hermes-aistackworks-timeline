@@ -174,23 +174,16 @@ class _UDSConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
-def _upload_asset(sock_path: str, card_id: str, event_key: str, asset_path: str,
+def _upload_bytes(sock_path: str, *, card_id: str, event_key: str, filename: str,
+                  content_type: str, data: bytes, media_kind: str,
                   timeout: float) -> str | None:
-    """Upload ``asset_path`` to AIStackWorks via the daemon UDS; return the hosted URL.
+    """Upload bytes to AIStackWorks via the daemon UDS; return the hosted href.
 
-    POSTs the raw bytes to ``/v1/agent-media`` with the card identity, the
-    inferred content type, and the filename in headers (the daemon wraps it as
-    multipart for AIStackWorks and adds the AIStackWorks bearer). Returns the ``url`` AIStackWorks assigns, or
-    ``None`` on any failure (best-effort by contract)."""
-    try:
-        with open(asset_path, "rb") as fh:
-            data = fh.read()
-    except OSError as exc:
-        _log.warning("demo asset unreadable, skipping upload: %s (%s)", asset_path, exc)
-        return None
-
-    filename = os.path.basename(asset_path) or "asset"
-    content_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+    POSTs the raw bytes to ``/v1/agent-media`` with card/event/filename/type
+    headers (the daemon wraps it as multipart for AIStackWorks and adds its
+    bearer). AIStackWorks returns ``url`` for videos and ``href`` for
+    attachments; accept either. Best-effort by contract.
+    """
     conn = _UDSConnection(sock_path, timeout)
     try:
         conn.request(
@@ -202,6 +195,7 @@ def _upload_asset(sock_path: str, card_id: str, event_key: str, asset_path: str,
                 "X-Card-Id": card_id,
                 "X-Event-Key": event_key,
                 "X-Filename": filename,
+                "X-Media-Kind": media_kind,
             },
         )
         resp = conn.getresponse()
@@ -214,25 +208,58 @@ def _upload_asset(sock_path: str, card_id: str, event_key: str, asset_path: str,
                 sock_path, resp.status, (raw[:200].decode("utf-8", "replace") if raw else ""),
             )
             return None
-        url = (json.loads(raw or b"{}") or {}).get("url")
-        _log.info("demo asset uploaded -> %s", url)
-        return url
+        payload = json.loads(raw or b"{}") or {}
+        href = payload.get("url") or payload.get("href")
+        _log.info("%s asset uploaded -> %s", media_kind, href)
+        return href
     except (OSError, ValueError) as exc:
-        _log.warning("demo asset upload errored talking to daemon %s: %s", sock_path, exc)
+        _log.warning("%s asset upload errored talking to daemon %s: %s", media_kind, sock_path, exc)
         return None
     finally:
         conn.close()
+
+
+def _upload_asset(sock_path: str, card_id: str, event_key: str, asset_path: str,
+                  timeout: float) -> str | None:
+    """Upload ``asset_path`` to AIStackWorks via the daemon UDS; return the hosted URL."""
+    try:
+        with open(asset_path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+
+    filename = os.path.basename(asset_path) or "asset"
+    content_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+    return _upload_bytes(
+        sock_path, card_id=card_id, event_key=event_key, filename=filename,
+        content_type=content_type, data=data, media_kind="demo", timeout=timeout,
+    )
+
+
+def upload_transcript(card_id: str, event_key: str, transcript: str, *, filename: str = "transcript.log") -> str | None:
+    """Best-effort upload of a text transcript attachment for one timeline event."""
+    data = transcript.encode("utf-8", errors="replace")
+    safe_name = os.path.basename(filename) or "transcript.log"
+    return _upload_bytes(
+        _SOCK, card_id=card_id, event_key=event_key, filename=safe_name,
+        content_type="text/plain; charset=utf-8", data=data,
+        media_kind="transcript", timeout=_MEDIA_TIMEOUT_S,
+    )
 
 # Track which (card_id, skill) milestones the current session has already
 # emitted, so the Kanban-transition backstop hook only fires when the skill
 # itself didn't. Reset per session by the on_session_start hook.
 _emitted_lock = threading.Lock()
 _emitted: set[tuple[str, str]] = set()
+_emitted_event_keys: dict[tuple[str, str], str] = {}
 
 
-def mark_emitted(card_id: str, skill: str) -> None:
+def mark_emitted(card_id: str, skill: str, event_key: str = "") -> None:
     with _emitted_lock:
-        _emitted.add((card_id, skill))
+        key = (card_id, skill)
+        _emitted.add(key)
+        if event_key:
+            _emitted_event_keys[key] = event_key
 
 
 def already_emitted(card_id: str, skill: str) -> bool:
@@ -240,9 +267,15 @@ def already_emitted(card_id: str, skill: str) -> bool:
         return (card_id, skill) in _emitted
 
 
+def emitted_event_key(card_id: str, skill: str) -> str:
+    with _emitted_lock:
+        return _emitted_event_keys.get((card_id, skill), "")
+
+
 def reset_emitted() -> None:
     with _emitted_lock:
         _emitted.clear()
+        _emitted_event_keys.clear()
 
 
 def _emit_event(payload: dict) -> dict:
