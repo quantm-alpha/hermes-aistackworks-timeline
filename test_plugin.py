@@ -179,6 +179,31 @@ class ReportProgressTests(unittest.TestCase):
         self.assertEqual(sent["event_key"], "card-deadbeef:build:2:pass")
         self.assertEqual(sent["artifact"]["kind"], "commit")
 
+    def test_object_field_values_are_flattened(self):
+        # Models occasionally emit a nested object where a string belongs —
+        # the payload must flatten it so AIStackWorks never renders raw JSON.
+        identity.remember("card-deadbeef")
+        result = json.loads(
+            tools.report_progress(
+                {
+                    "skill": "review",
+                    "status": "pass",
+                    "headline": "Review PASS",
+                    "fields": {
+                        "Tests": ["7/7 pass (vitest)", {"Commit count": "7"}],
+                        "Meta": {"Files changed": "7 (+326/-48)"},
+                        "Branch": "feat/foo",
+                    },
+                }
+            )
+        )
+        self.assertTrue(result["ok"], result)
+        self.daemon._thread.join(timeout=2)
+        sent = json.loads(self.daemon.captured)
+        self.assertEqual(sent["fields"]["Tests"], ["7/7 pass (vitest)", "Commit count: 7"])
+        self.assertEqual(sent["fields"]["Meta"], "Files changed: 7 (+326/-48)")
+        self.assertEqual(sent["fields"]["Branch"], "feat/foo")
+
     def test_explicit_card_id_overrides_subtask_session(self):
         # Coder/reviewer/ship run as spawned Kanban tasks whose session id is the
         # task id, NOT card-<notion_page_id>. The explicit card_id arg must win so

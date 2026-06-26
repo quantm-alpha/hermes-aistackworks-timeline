@@ -53,7 +53,21 @@ REPORT_PROGRESS = {
             },
             "fields": {
                 "type": "object",
-                "description": "Flat label→value map shown as chips, e.g. {'Files changed': '14 (+482/-91)', 'Branch': 'feat/foo'}. Values may be strings, numbers, or arrays.",
+                "description": (
+                    "Flat label→value map shown as chips, e.g. "
+                    "{'Files changed': '14 (+482/-91)', 'Branch': 'feat/foo'}. "
+                    "Values MUST be scalars (string/number/boolean) or arrays of "
+                    "scalars — never nested objects (they render as raw JSON)."
+                ),
+                "additionalProperties": {
+                    "anyOf": [
+                        {"type": ["string", "number", "boolean", "null"]},
+                        {
+                            "type": "array",
+                            "items": {"type": ["string", "number", "boolean"]},
+                        },
+                    ]
+                },
             },
             "sections": {
                 "type": "array",
@@ -62,7 +76,15 @@ REPORT_PROGRESS = {
                     "type": "object",
                     "properties": {
                         "heading": {"type": "string"},
-                        "body": {"type": "string"},
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "Rendered verbatim with newlines preserved — "
+                                "write multi-line text with '- ' bullets for "
+                                "anything beyond a sentence or two, never one "
+                                "run-on paragraph."
+                            ),
+                        },
                     },
                     "required": ["heading", "body"],
                 },
