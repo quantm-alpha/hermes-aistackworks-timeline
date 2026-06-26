@@ -986,6 +986,21 @@ class TranscriptUploadTests(unittest.TestCase):
         self.assertEqual(media_headers["x-filename"], "t_coder.log")
         self.assertEqual(self.daemon.bodies["/v1/agent-media"], b"terminal transcript from kanban log\n")
 
+    def test_report_progress_uploads_stage_handoff_status_transcript(self):
+        # The live skills emit the "stage handoff" dialect (build→ready_for_test),
+        # not the backstop's "done"; the transcript must still capture it.
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress(
+                {"card_id": "cardX", "skill": "build", "status": "ready_for_test", "headline": "done"}
+            )
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn("/v1/agent-media", self.daemon.bodies)
+        media_headers = self.daemon.headers["/v1/agent-media"]
+        self.assertEqual(media_headers["x-media-kind"], "transcript")
+        self.assertEqual(media_headers["x-event-key"], "card-cardX:build:1:ready_for_test")
+
     def test_report_progress_skips_started_status_transcript(self):
         identity.remember("t_coder")
         result = json.loads(

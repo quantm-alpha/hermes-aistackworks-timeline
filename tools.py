@@ -160,13 +160,31 @@ def _sanitize_fields(fields):
 
 
 _TRANSCRIPT_MAX_BYTES = int(os.environ.get("AISTACKWORKS_TRANSCRIPT_MAX_BYTES", str(5 * 1024 * 1024)))
-# Terminal stage-result statuses whose rendered task log is worth capturing.
-# Mirrors the pipeline's stage-success vocabulary (__init__.SKILL_SUCCESS_STATUS:
-# build/test/demo/docs/ship → "done", review → "passed") plus "blocked".
+# Terminal stage-result statuses whose rendered task log is worth capturing. This
+# must cover BOTH dialects MC's EVENT_STATUS_MAP accepts: the "stage handoff"
+# keywords the live skills actually emit (build→ready_for_test, test→awaiting_demo,
+# demo→awaiting_ship, refine→awaiting_prd_review, ship→shipped/ready_to_merge) AND
+# the "lifecycle"/backstop vocabulary (SKILL_SUCCESS_STATUS: …→done, review→passed).
+# It also captures terminal failures (review→failed, blocked) — the blocked/failed
+# transcript is the most valuable one to inspect. ``started`` is intentionally
+# excluded so stage-pickup rows never upload a partial log.
 _TRANSCRIPT_TERMINAL_STATUSES = {
+    # stage-handoff dialect
+    "ready_for_test",
+    "awaiting_demo",
+    "awaiting_ship",
+    "awaiting_prd_review",
+    # lifecycle / backstop dialect
     "done",
+    "pass",
     "passed",
+    # terminal results + ship / merge-queue
+    "failed",
     "blocked",
+    "ready_to_merge",
+    "shipped",
+    "merged",
+    "released",
 }
 
 
@@ -268,7 +286,8 @@ def _normalize_event_key(event_key: str, status: str | None = None) -> str:
 
 
 def _is_transcript_terminal_status(status: str) -> bool:
-    return (status or "").strip().lower() in _TRANSCRIPT_TERMINAL_STATUSES
+    normalized = (status or "").strip().lower()
+    return normalized in _TRANSCRIPT_TERMINAL_STATUSES or normalized.startswith("blocked")
 
 
 def _current_task_log_path() -> str:
