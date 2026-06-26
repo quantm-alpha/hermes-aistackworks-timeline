@@ -24,8 +24,11 @@ Two layers drive the card's timeline so AIStackWorks never goes blind on a stage
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import sqlite3
+from datetime import datetime
 
 from . import identity, schemas, tools
 
@@ -203,7 +206,83 @@ def _terminal_skill(meta: dict) -> str:
     return skills[-1] if skills else ""
 
 
-def _worker_terminal_backstop() -> None:
+def _session_state_db_path() -> str:
+    home = os.environ.get("HERMES_HOME", "").strip()
+    if home:
+        cand = os.path.join(home, "state.db")
+        if os.path.isfile(cand):
+            return cand
+    # Conventional profile location used by the AIStackWorks agent-host image.
+    profile = os.environ.get("HERMES_PROFILE", "").strip()
+    if profile:
+        cand = f"/opt/data/profiles/{profile}/state.db"
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _format_ts(ts) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts)).isoformat(timespec="seconds")
+    except Exception:
+        return ""
+
+
+def _shorten(value: str, limit: int = 120_000) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"\n\n[transcript truncated at {limit} characters]"
+
+
+def _session_transcript(session_id: str) -> str:
+    """Best-effort text transcript of the current Hermes session from state.db."""
+    sid = (session_id or os.environ.get("HERMES_SESSION_ID", "")).strip()
+    db_path = _session_state_db_path()
+    if not sid or not db_path:
+        return ""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            rows = conn.execute(
+                "SELECT role, content, tool_name, tool_calls, timestamp FROM messages "
+                "WHERE session_id = ? ORDER BY id ASC",
+                (sid,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+    lines: list[str] = []
+    for role, content, tool_name, tool_calls, ts in rows:
+        stamp = _format_ts(ts)
+        prefix = f"[{stamp}] {role}" if stamp else str(role)
+        if tool_name:
+            prefix += f" tool={tool_name}"
+        lines.append(prefix)
+        if content:
+            lines.append(str(content))
+        if tool_calls:
+            try:
+                parsed = json.loads(tool_calls)
+                lines.append(json.dumps(parsed, ensure_ascii=False, indent=2))
+            except Exception:
+                lines.append(str(tool_calls))
+        lines.append("")
+    return _shorten("\n".join(lines).strip())
+
+
+def _upload_transcript_for_events(card_id: str, task_id: str, event_keys: list[str], session_id: str) -> None:
+    if not card_id or not event_keys:
+        return
+    for event_key in dict.fromkeys(event_keys):
+        try:
+            status = event_key.rsplit(":", 1)[-1] if ":" in event_key else ""
+            tools._upload_current_task_log(card_id, event_key, status)
+        except Exception:
+            logger.debug("aistackworks-timeline transcript upload failed", exc_info=True)
+
+
+def _worker_terminal_backstop(session_id: str = "") -> None:
     """Deterministically emit any of the worker task's stage milestones the skill
     didn't report itself.
 
@@ -225,16 +304,29 @@ def _worker_terminal_backstop() -> None:
     if (meta.get("status") or "").strip().lower() == "blocked":
         return  # a block is handled by the kanban_block hook, not as success
     run = identity.read_latest_run(tid)
+    event_keys: list[str] = []
     for skill in skills:  # stage order: build → test → demo (or just ship)
         status = SKILL_SUCCESS_STATUS.get(skill)
-        if not status or tools.already_emitted(card_id, skill):
+        if not status:
+            continue
+        if tools.already_emitted(card_id, skill):
+            event_key = tools.emitted_event_key(card_id, skill)
+            if event_key:
+                event_keys.append(event_key)
             continue  # the skill reported this stage live; don't duplicate
-        tools.report_progress(_rich_event(card_id, skill, status, run))
+        result_raw = tools.report_progress(_rich_event(card_id, skill, status, run))
+        try:
+            event_key = (json.loads(result_raw or "{}") or {}).get("event_key")
+        except Exception:
+            event_key = ""
+        if event_key:
+            event_keys.append(event_key)
+    _upload_transcript_for_events(card_id, tid, event_keys, session_id)
 
 
 def _on_session_finalize(session_id="", **_kwargs) -> None:
     try:
-        _worker_terminal_backstop()
+        _worker_terminal_backstop(session_id)
     except Exception:  # never let a backstop break the agent
         logger.debug("aistackworks-timeline session-finalize backstop failed", exc_info=True)
 

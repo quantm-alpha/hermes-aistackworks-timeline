@@ -18,6 +18,12 @@ import tempfile
 import threading
 import unittest
 
+# Keep standalone plugin tests hermetic when run from inside a live Hermes Kanban
+# worker: the production plugin intentionally reads these env vars, but fixture
+# sessions like "card-deadbeef" should not be overridden by the caller's task.
+for _external_env in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_HOME", "HERMES_HOME"):
+    os.environ.pop(_external_env, None)
+
 # The plugin uses package-relative imports (how Hermes loads it). The directory
 # name has a hyphen, so register a synthetic package pointing at this dir to make
 # those relative imports resolve when running the tests standalone.
@@ -624,6 +630,7 @@ class AssetUploadTests(_NoMcpEnvMixin, unittest.TestCase):
         # omitted iter normalized to 1), which the asset upload tags the media with.
         self.assertEqual(media_headers["x-event-key"], "card-deadbeef:demo:1:pass")
         self.assertEqual(media_headers["x-filename"], "page@abc.mp4")
+        self.assertEqual(media_headers["x-media-kind"], "demo")
         self.assertEqual(media_headers["content-type"], "video/mp4")
         # The emitted timeline event points the artifact at the hosted URL.
         sent = json.loads(self.daemon.bodies["/v1/agent-event"])
@@ -911,6 +918,116 @@ class McpTransportTests(unittest.TestCase):
         # …and the event (over MCP) points the artifact at the hosted URL.
         args = server.last_envelope["params"]["arguments"]
         self.assertEqual(args["artifact"]["href"], media_url)
+
+
+class TranscriptUploadTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.sock = os.path.join(self.tmp, "agent.sock")
+        self.daemon = _RoutingDaemon(self.sock, "/api/cards/cardX/attachments/a1/")
+        self._orig_sock = tools._SOCK
+        tools._SOCK = self.sock
+        self.db = os.path.join(self.tmp, "kanban.db")
+        _make_kanban_db(
+            self.db,
+            [("t_coder", "Add tagline", "card_id: cardX\n\n...", '["build"]', "running")],
+            runs=[("t_coder", "done", json.dumps({}), "completed", "done", 1000)],
+        )
+        self.state_db = os.path.join(self.tmp, "state.db")
+        conn = sqlite3.connect(self.state_db)
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, tool_name TEXT, tool_calls TEXT, timestamp REAL)")
+        conn.executemany(
+            "INSERT INTO messages (session_id,role,content,tool_name,tool_calls,timestamp) VALUES (?,?,?,?,?,?)",
+            [
+                ("t_coder", "user", "work kanban task", "", "", 100.0),
+                ("t_coder", "assistant", "done", "", json.dumps([{"name": "kanban_complete"}]), 101.0),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        self._env = {k: os.environ.get(k) for k in ("HERMES_KANBAN_DB", "HERMES_KANBAN_TASK", "HERMES_HOME")}
+        os.environ["HERMES_KANBAN_DB"] = self.db
+        os.environ["HERMES_KANBAN_TASK"] = "t_coder"
+        os.environ["HERMES_HOME"] = self.tmp
+        log_dir = pathlib.Path(self.tmp) / "kanban" / "logs"
+        log_dir.mkdir(parents=True)
+        self.log_path = log_dir / "t_coder.log"
+        self.log_path.write_text("terminal transcript from kanban log\n", encoding="utf-8")
+        tools.reset_emitted()
+
+    def tearDown(self):
+        tools._SOCK = self._orig_sock
+        self.daemon.close()
+        for k, v in self._env.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def test_worker_finalize_uploads_session_transcript_attachment(self):
+        plugin._on_session_finalize(session_id="t_coder")
+        self.assertIn("/v1/agent-media", self.daemon.bodies)
+        media_headers = self.daemon.headers["/v1/agent-media"]
+        self.assertEqual(media_headers["x-card-id"], "cardX")
+        self.assertEqual(media_headers["x-event-key"], "card-cardX:build:1:done")
+        self.assertEqual(media_headers["x-media-kind"], "transcript")
+        self.assertEqual(media_headers["x-filename"], "t_coder.log")
+        self.assertEqual(self.daemon.bodies["/v1/agent-media"], b"terminal transcript from kanban log\n")
+
+    def test_report_progress_uploads_terminal_task_log_attachment(self):
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress(
+                {"card_id": "cardX", "skill": "build", "status": "done", "headline": "done"}
+            )
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn("/v1/agent-media", self.daemon.bodies)
+        media_headers = self.daemon.headers["/v1/agent-media"]
+        self.assertEqual(media_headers["x-media-kind"], "transcript")
+        self.assertEqual(media_headers["x-event-key"], "card-cardX:build:1:done")
+        self.assertEqual(media_headers["x-filename"], "t_coder.log")
+        self.assertEqual(self.daemon.bodies["/v1/agent-media"], b"terminal transcript from kanban log\n")
+
+    def test_report_progress_skips_started_status_transcript(self):
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress({"card_id": "cardX", "skill": "build", "status": "started", "headline": "start"})
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("/v1/agent-media", self.daemon.bodies)
+
+    def test_report_progress_skips_missing_task_log(self):
+        self.log_path.unlink()
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress(
+                {"card_id": "cardX", "skill": "build", "status": "done", "headline": "done"}
+            )
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("/v1/agent-media", self.daemon.bodies)
+
+    def test_report_progress_skips_oversize_task_log(self):
+        old_max = getattr(tools, "_TRANSCRIPT_MAX_BYTES")
+        setattr(tools, "_TRANSCRIPT_MAX_BYTES", 8)
+        try:
+            identity.remember("t_coder")
+            result = json.loads(
+                tools.report_progress(
+                    {"card_id": "cardX", "skill": "build", "status": "done", "headline": "done"}
+                )
+            )
+        finally:
+            setattr(tools, "_TRANSCRIPT_MAX_BYTES", old_max)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("/v1/agent-media", self.daemon.bodies)
+
+    def test_blocked_transcript_upload_uses_normalized_event_key(self):
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress({"card_id": "cardX", "skill": "build", "status": "blocked", "headline": "blocked", "iter": 2})
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn("/v1/agent-media", self.daemon.bodies)
+        self.assertEqual(self.daemon.headers["/v1/agent-media"]["x-event-key"], "card-cardX:build::blocked")
 
 
 if __name__ == "__main__":
