@@ -32,6 +32,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import socket
 import threading
 import urllib.error
@@ -158,6 +159,17 @@ def _sanitize_fields(fields):
     return {k: _sanitize_field_value(v) for k, v in fields.items()}
 
 
+_TRANSCRIPT_MAX_BYTES = int(os.environ.get("AISTACKWORKS_TRANSCRIPT_MAX_BYTES", str(5 * 1024 * 1024)))
+_TRANSCRIPT_TERMINAL_STATUSES = {
+    "awaiting_prd_review",
+    "ready_for_test",
+    "awaiting_demo",
+    "pass",
+    "shipped",
+    "blocked",
+}
+
+
 class _UDSConnection(http.client.HTTPConnection):
     """``http.client`` over an ``AF_UNIX`` socket — gives us full, robust
     response parsing (status + body) for the media-upload round-trip, which the
@@ -244,6 +256,72 @@ def upload_transcript(card_id: str, event_key: str, transcript: str, *, filename
         _SOCK, card_id=card_id, event_key=event_key, filename=safe_name,
         content_type="text/plain; charset=utf-8", data=data,
         media_kind="transcript", timeout=_MEDIA_TIMEOUT_S,
+    )
+
+
+def _normalize_event_key(event_key: str, status: str | None = None) -> str:
+    """Mirror Mission Control's storage key normalization for transcript links."""
+    normalized_status = (status or "").strip().lower()
+    if normalized_status == "blocked" or event_key.endswith(":blocked"):
+        return re.sub(r":\d+:blocked$", "::blocked", event_key)
+    return event_key
+
+
+def _is_transcript_terminal_status(status: str) -> bool:
+    return (status or "").strip().lower() in _TRANSCRIPT_TERMINAL_STATUSES
+
+
+def _current_task_log_path() -> str:
+    """Discover ``~/.hermes/kanban/logs/t_<taskid>.log`` for this worker."""
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if not task_id:
+        return ""
+    candidates: list[str] = []
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        candidates.append(os.path.join(hermes_home, "kanban", "logs", f"{task_id}.log"))
+    candidates.append(os.path.expanduser(os.path.join("~", ".hermes", "kanban", "logs", f"{task_id}.log")))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
+def _read_current_task_log() -> tuple[str, bytes] | None:
+    path = _current_task_log_path()
+    if not path:
+        return None
+    try:
+        size = os.path.getsize(path)
+        if size <= 0 or size > _TRANSCRIPT_MAX_BYTES:
+            return None
+        with open(path, "rb") as fh:
+            return path, fh.read()
+    except OSError:
+        return None
+
+
+def _upload_current_task_log(card_id: str, event_key: str, status: str) -> str | None:
+    """Upload the active worker's terminal transcript log for terminal events.
+
+    Best-effort: missing, empty, or oversized logs are silently skipped so
+    timeline emission is never blocked by transcript capture.
+    """
+    if not _is_transcript_terminal_status(status):
+        return None
+    found = _read_current_task_log()
+    if not found:
+        return None
+    path, data = found
+    return _upload_bytes(
+        _SOCK,
+        card_id=card_id,
+        event_key=_normalize_event_key(event_key, status),
+        filename=os.path.basename(path) or "transcript.log",
+        content_type="text/plain; charset=utf-8",
+        data=data,
+        media_kind="transcript",
+        timeout=_MEDIA_TIMEOUT_S,
     )
 
 # Track which (card_id, skill) milestones the current session has already
@@ -403,4 +481,5 @@ def report_progress(args: dict, **_kwargs) -> str:
     result = _emit_event(payload)
     if result.get("ok"):
         mark_emitted(card_id, skill)
+        _upload_current_task_log(card_id, payload["event_key"], status)
     return json.dumps(result)

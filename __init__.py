@@ -274,13 +274,10 @@ def _session_transcript(session_id: str) -> str:
 def _upload_transcript_for_events(card_id: str, task_id: str, event_keys: list[str], session_id: str) -> None:
     if not card_id or not event_keys:
         return
-    transcript = _session_transcript(session_id)
-    if not transcript:
-        return
-    filename = f"{task_id or session_id or 'session'}.log"
     for event_key in dict.fromkeys(event_keys):
         try:
-            tools.upload_transcript(card_id, event_key, transcript, filename=filename)
+            status = event_key.rsplit(":", 1)[-1] if ":" in event_key else ""
+            tools._upload_current_task_log(card_id, event_key, status)
         except Exception:
             logger.debug("aistackworks-timeline transcript upload failed", exc_info=True)
 

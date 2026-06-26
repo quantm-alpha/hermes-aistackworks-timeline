@@ -943,6 +943,10 @@ class TranscriptUploadTests(unittest.TestCase):
         os.environ["HERMES_KANBAN_DB"] = self.db
         os.environ["HERMES_KANBAN_TASK"] = "t_coder"
         os.environ["HERMES_HOME"] = self.tmp
+        log_dir = pathlib.Path(self.tmp) / "kanban" / "logs"
+        log_dir.mkdir(parents=True)
+        self.log_path = log_dir / "t_coder.log"
+        self.log_path.write_text("terminal transcript from kanban log\n", encoding="utf-8")
         tools.reset_emitted()
 
     def tearDown(self):
@@ -959,7 +963,65 @@ class TranscriptUploadTests(unittest.TestCase):
         self.assertEqual(media_headers["x-event-key"], "card-cardX:build::ready_for_test")
         self.assertEqual(media_headers["x-media-kind"], "transcript")
         self.assertEqual(media_headers["x-filename"], "t_coder.log")
-        self.assertIn(b"work kanban task", self.daemon.bodies["/v1/agent-media"])
+        self.assertEqual(self.daemon.bodies["/v1/agent-media"], b"terminal transcript from kanban log\n")
+
+    def test_report_progress_uploads_terminal_task_log_attachment(self):
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress(
+                {"card_id": "cardX", "skill": "build", "status": "ready_for_test", "headline": "done"}
+            )
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn("/v1/agent-media", self.daemon.bodies)
+        media_headers = self.daemon.headers["/v1/agent-media"]
+        self.assertEqual(media_headers["x-media-kind"], "transcript")
+        self.assertEqual(media_headers["x-event-key"], "card-cardX:build::ready_for_test")
+        self.assertEqual(media_headers["x-filename"], "t_coder.log")
+        self.assertEqual(self.daemon.bodies["/v1/agent-media"], b"terminal transcript from kanban log\n")
+
+    def test_report_progress_skips_started_status_transcript(self):
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress({"card_id": "cardX", "skill": "build", "status": "started", "headline": "start"})
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("/v1/agent-media", self.daemon.bodies)
+
+    def test_report_progress_skips_missing_task_log(self):
+        self.log_path.unlink()
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress(
+                {"card_id": "cardX", "skill": "build", "status": "ready_for_test", "headline": "done"}
+            )
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("/v1/agent-media", self.daemon.bodies)
+
+    def test_report_progress_skips_oversize_task_log(self):
+        old_max = getattr(tools, "_TRANSCRIPT_MAX_BYTES")
+        setattr(tools, "_TRANSCRIPT_MAX_BYTES", 8)
+        try:
+            identity.remember("t_coder")
+            result = json.loads(
+                tools.report_progress(
+                    {"card_id": "cardX", "skill": "build", "status": "ready_for_test", "headline": "done"}
+                )
+            )
+        finally:
+            setattr(tools, "_TRANSCRIPT_MAX_BYTES", old_max)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("/v1/agent-media", self.daemon.bodies)
+
+    def test_blocked_transcript_upload_uses_normalized_event_key(self):
+        identity.remember("t_coder")
+        result = json.loads(
+            tools.report_progress({"card_id": "cardX", "skill": "build", "status": "blocked", "headline": "blocked", "iter": 2})
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn("/v1/agent-media", self.daemon.bodies)
+        self.assertEqual(self.daemon.headers["/v1/agent-media"]["x-event-key"], "card-cardX:build::blocked")
 
 
 if __name__ == "__main__":
