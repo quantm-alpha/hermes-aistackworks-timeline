@@ -120,6 +120,26 @@ class _MultiDaemon:
         self._srv.close()
 
 
+_MCP_ENV_KEYS = ("MC_MCP_URL", "MC_MCP_TOKEN")
+
+
+class _NoMcpEnvMixin:
+    """Ensure the MCP transport env is UNSET so a test that targets the UDS leg is
+    deterministic regardless of the ambient environment (a profile that exports
+    MC_MCP_URL/MC_MCP_TOKEN would otherwise route the event over MCP)."""
+
+    def _clear_mcp_env(self):
+        self.__mcp_env = {k: os.environ.pop(k, None) for k in _MCP_ENV_KEYS}
+        self.addCleanup(self.__restore_mcp_env)
+
+    def __restore_mcp_env(self):
+        for k, v in self.__mcp_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 class IdentityTests(unittest.TestCase):
     def test_derives_card_from_card_prefix(self):
         identity.remember("card-36fc-abc")
@@ -139,8 +159,9 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(card, "keep")
 
 
-class ReportProgressTests(unittest.TestCase):
+class ReportProgressTests(_NoMcpEnvMixin, unittest.TestCase):
     def setUp(self):
+        self._clear_mcp_env()
         self.tmp = tempfile.mkdtemp()
         self.sock = os.path.join(self.tmp, "agent.sock")
         self.daemon = _FakeDaemon(self.sock)
@@ -233,7 +254,9 @@ class ReportProgressTests(unittest.TestCase):
 
     def test_explicit_card_id_synthesizes_session_when_no_identity(self):
         # No session identity captured at all (hook never fired): synthesize the
-        # canonical card-<id> session so the event_key stays well-formed.
+        # canonical card-<id> session so the event_key stays well-formed. An
+        # omitted iter normalizes to 1 (the MC tool's default) so both transports
+        # always compute the identical key.
         identity._current["card_id"] = ""
         identity._current["session_id"] = ""
         result = json.loads(
@@ -246,7 +269,8 @@ class ReportProgressTests(unittest.TestCase):
         sent = json.loads(self.daemon.captured)
         self.assertEqual(sent["card_id"], "cafe1234")
         self.assertEqual(sent["session_id"], "card-cafe1234")
-        self.assertEqual(sent["event_key"], "card-cafe1234:ship::shipped")
+        self.assertEqual(sent["event_key"], "card-cafe1234:ship:1:shipped")
+        self.assertEqual(sent["iter"], 1)
 
     def test_missing_identity_is_a_noop(self):
         # Reset identity to empty.
@@ -330,8 +354,9 @@ class KanbanIdentityTests(unittest.TestCase):
         self.assertEqual(session, "t_coder")
 
 
-class BackstopHookTests(unittest.TestCase):
+class BackstopHookTests(_NoMcpEnvMixin, unittest.TestCase):
     def setUp(self):
+        self._clear_mcp_env()
         self.tmp = tempfile.mkdtemp()
         self.sock = os.path.join(self.tmp, "agent.sock")
         self.daemon = _MultiDaemon(self.sock)
@@ -363,10 +388,11 @@ class BackstopHookTests(unittest.TestCase):
         os.environ["HERMES_KANBAN_TASK"] = "t_coder"
         plugin._on_session_finalize(session_id="t_coder")
         sent = self.daemon.by_skill()
-        # All three stages the coder task covered are emitted, in order.
-        self.assertIn(("build", "ready_for_test"), sent)
-        self.assertIn(("test", "awaiting_demo"), sent)
-        self.assertIn(("demo", "pass"), sent)
+        # All three stages the coder task covered are emitted, in order — each with
+        # the kanban-execution completion status ("done").
+        self.assertIn(("build", "done"), sent)
+        self.assertIn(("test", "done"), sent)
+        self.assertIn(("demo", "done"), sent)
         self.assertTrue(all(e["card_id"] == "cardX" for e in self.daemon.events()))
 
     def test_backstop_fills_only_stages_the_skill_skipped(self):
@@ -376,7 +402,7 @@ class BackstopHookTests(unittest.TestCase):
         plugin._on_session_finalize(session_id="t_coder")
         sent = self.daemon.by_skill()
         # Only the un-emitted demo stage is backstopped; no build/test duplicate.
-        self.assertEqual(list(sent), [("demo", "pass")])
+        self.assertEqual(list(sent), [("demo", "done")])
 
     def test_backstop_skips_when_all_stages_already_emitted(self):
         os.environ["HERMES_KANBAN_TASK"] = "t_coder"
@@ -385,10 +411,10 @@ class BackstopHookTests(unittest.TestCase):
         plugin._on_session_finalize(session_id="t_coder")
         self.assertEqual(self.daemon.events(), [])  # no duplicates
 
-    def test_ship_title_maps_to_ship_shipped(self):
+    def test_ship_title_maps_to_ship_done(self):
         os.environ["HERMES_KANBAN_TASK"] = "t_ship"
         plugin._on_session_finalize(session_id="t_ship")
-        self.assertEqual(list(self.daemon.by_skill()), [("ship", "shipped")])
+        self.assertEqual(list(self.daemon.by_skill()), [("ship", "done")])
 
     def test_blocked_task_does_not_emit_success(self):
         os.environ["HERMES_KANBAN_TASK"] = "t_blocked"
@@ -401,10 +427,13 @@ class BackstopHookTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["status"], "blocked")
 
-    def test_reviewer_task_is_not_advanced(self):
+    def test_reviewer_task_backstops_review_passed(self):
+        # Under kanban-execution, review IS an advancing stage: a reviewer worker
+        # that finished its task without blocking emits review/passed (→ Ready for
+        # Docs). Derived from the "Review:" title (no skills list on the task).
         os.environ["HERMES_KANBAN_TASK"] = "t_rev"
         plugin._on_session_finalize(session_id="t_rev")
-        self.assertEqual(self.daemon.events(), [])  # reviewer has no AIStackWorks mapping
+        self.assertEqual(list(self.daemon.by_skill()), [("review", "passed")])
 
     def test_non_worker_session_does_not_emit(self):
         os.environ.pop("HERMES_KANBAN_TASK", None)  # main's refine dispatch, not a worker
@@ -416,11 +445,12 @@ class BackstopHookTests(unittest.TestCase):
         self.assertEqual(self.daemon.events(), [])
 
 
-class RichBackstopTests(unittest.TestCase):
+class RichBackstopTests(_NoMcpEnvMixin, unittest.TestCase):
     """The worker-exit backstop builds a RICH event from the task's run record
     (summary + metadata the skill wrote to kanban_complete), not a stub line."""
 
     def setUp(self):
+        self._clear_mcp_env()
         self.tmp = tempfile.mkdtemp()
         self.sock = os.path.join(self.tmp, "agent.sock")
         self.daemon = _MultiDaemon(self.sock)
@@ -464,10 +494,11 @@ class RichBackstopTests(unittest.TestCase):
     def test_backstop_emits_rich_event_from_run_record(self):
         plugin._on_session_finalize(session_id="t_coder")
         by = self.daemon.by_skill()
-        # Every stage is emitted; each carries its own clean framing title.
-        self.assertEqual(by[("build", "ready_for_test")]["headline"], "What was built")
-        self.assertEqual(by[("test", "awaiting_demo")]["headline"], "QA results")
-        sent = by[("demo", "pass")]
+        # Every stage is emitted; each carries its own clean framing title and the
+        # kanban-execution completion status ("done").
+        self.assertEqual(by[("build", "done")]["headline"], "What was built")
+        self.assertEqual(by[("test", "done")]["headline"], "QA results")
+        sent = by[("demo", "done")]
         # Demo headline is a clean framing TITLE; the verbose run summary moves to
         # a body section (not dumped as the title).
         self.assertEqual(sent["headline"], "What was done")
@@ -480,7 +511,7 @@ class RichBackstopTests(unittest.TestCase):
         self.assertIn("README.md", sent["fields"]["FILES"])
         self.assertEqual(sent["artifact"]["kind"], "pr")
         # Canonical card-based event_key → dedups with a skill's live tool call.
-        self.assertEqual(sent["event_key"], "card-cardX:demo::pass")
+        self.assertEqual(sent["event_key"], "card-cardX:demo:1:done")
 
 
 class _RoutingDaemon:
@@ -551,10 +582,11 @@ class _RoutingDaemon:
         self._srv.close()
 
 
-class AssetUploadTests(unittest.TestCase):
+class AssetUploadTests(_NoMcpEnvMixin, unittest.TestCase):
     MEDIA_URL = "/api/cards/deadbeef/videos/vid-1/"
 
     def setUp(self):
+        self._clear_mcp_env()
         self.tmp = tempfile.mkdtemp()
         self.sock = os.path.join(self.tmp, "agent.sock")
         self.daemon = _RoutingDaemon(self.sock, self.MEDIA_URL)
@@ -588,9 +620,9 @@ class AssetUploadTests(unittest.TestCase):
         self.assertEqual(self.daemon.bodies["/v1/agent-media"], self.asset_bytes)
         media_headers = self.daemon.headers["/v1/agent-media"]
         self.assertEqual(media_headers["x-card-id"], "deadbeef")
-        # Canonical card-based event_key (this branch unifies it across tool +
-        # CLI + backstop), which is what the asset upload tags the media with.
-        self.assertEqual(media_headers["x-event-key"], "card-deadbeef:demo::pass")
+        # Canonical card-based event_key (unified across tool + CLI + backstop,
+        # omitted iter normalized to 1), which the asset upload tags the media with.
+        self.assertEqual(media_headers["x-event-key"], "card-deadbeef:demo:1:pass")
         self.assertEqual(media_headers["x-filename"], "page@abc.mp4")
         self.assertEqual(media_headers["content-type"], "video/mp4")
         # The emitted timeline event points the artifact at the hosted URL.
@@ -618,6 +650,267 @@ class AssetUploadTests(unittest.TestCase):
         self.assertNotIn("/v1/agent-media", self.daemon.bodies)
         sent = json.loads(self.daemon.bodies["/v1/agent-event"])
         self.assertEqual(sent["artifact"]["href"], "local/path.mp4")
+
+
+import http.server
+
+
+class _FakeMcpServer:
+    """A loopback HTTP server standing in for AIStackWorks' streamable-HTTP MCP
+    endpoint. Captures the last JSON-RPC envelope + auth header and replies per a
+    configurable ``mode``:
+
+      ``ok``        → 200 with a well-formed ``result`` envelope (tool ran)
+      ``rpc_error`` → 200 with a JSON-RPC ``error`` object (e.g. method/tool not
+                      found on an older AIStackWorks)
+      ``tool_error``→ 200 with ``result.isError`` (the tool reported a failure)
+      ``http_500``  → 500 (server error)
+    """
+
+    def __init__(self, mode: str = "ok"):
+        self.mode = mode
+        self.last_envelope: dict | None = None
+        self.last_auth: str | None = None
+        self.last_accept: str | None = None
+        self.call_count = 0
+        outer = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence the test output
+                pass
+
+            def do_POST(self):
+                outer.call_count += 1
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length)
+                try:
+                    outer.last_envelope = json.loads(raw or b"{}")
+                except ValueError:
+                    outer.last_envelope = None
+                outer.last_auth = self.headers.get("Authorization")
+                outer.last_accept = self.headers.get("Accept")
+                if outer.mode == "http_500":
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(b"boom")
+                    return
+                if outer.mode == "rpc_error":
+                    payload = {"jsonrpc": "2.0", "id": 1,
+                               "error": {"code": -32601, "message": "tool not found"}}
+                elif outer.mode == "tool_error":
+                    payload = {"jsonrpc": "2.0", "id": 1, "result": {
+                        "isError": True,
+                        "content": [{"type": "text", "text": "card not found"}]}}
+                else:  # ok
+                    payload = {"jsonrpc": "2.0", "id": 1, "result": {
+                        "content": [{"type": "text", "text": "recorded event"}],
+                        "structuredContent": {"result": "recorded event card-x: ..."}}}
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self._httpd = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}/api/mcp/?project=demo"
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+class McpTransportTests(unittest.TestCase):
+    """The MCP-first transport: when MC_MCP_URL/MC_MCP_TOKEN are set the event is
+    POSTed as a JSON-RPC tools/call; on ANY MCP failure it falls back to UDS."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        # A UDS daemon is always present so we can assert when the fallback fires.
+        self.sock = os.path.join(self.tmp, "agent.sock")
+        self.daemon = _FakeDaemon(self.sock)
+        self._orig_sock = tools._SOCK
+        tools._SOCK = self.sock
+        self._mcp_env = {k: os.environ.get(k) for k in _MCP_ENV_KEYS}
+        identity.remember("card-deadbeef")
+
+    def tearDown(self):
+        tools._SOCK = self._orig_sock
+        self.daemon.close()
+        for k, v in self._mcp_env.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def _set_mcp(self, server):
+        os.environ["MC_MCP_URL"] = server.url
+        os.environ["MC_MCP_TOKEN"] = "tok-abc"
+        self.addCleanup(server.close)
+
+    def test_mcp_success_does_not_touch_uds(self):
+        server = _FakeMcpServer(mode="ok")
+        self._set_mcp(server)
+        result = json.loads(tools.report_progress({
+            "skill": "build", "status": "done", "headline": "Build complete",
+            "iter": 2, "fields": {"BRANCH": "feat/x"},
+            "artifact": {"kind": "pr", "label": "PR #9", "href": "http://x/9"},
+        }))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["transport"], "mcp")
+        # The MCP server saw the call; the UDS daemon did NOT.
+        self.assertEqual(server.call_count, 1)
+        self.daemon._thread.join(timeout=0.5)
+        self.assertIsNone(self.daemon.captured)
+
+    def test_mcp_payload_uses_mc_tool_argument_names(self):
+        server = _FakeMcpServer(mode="ok")
+        self._set_mcp(server)
+        tools.report_progress({
+            "skill": "build", "status": "done", "headline": "Build complete",
+            "iter": 3, "fields": {"BRANCH": "feat/x"},
+            "sections": [{"heading": "Summary", "body": "did it"}],
+            "artifact": {"kind": "pr", "label": "PR", "href": "http://x/9"},
+        })
+        env = server.last_envelope
+        self.assertEqual(env["jsonrpc"], "2.0")
+        self.assertEqual(env["method"], "tools/call")
+        self.assertEqual(env["params"]["name"], "report_progress")
+        args = env["params"]["arguments"]
+        # Exactly the MC report_progress tool's argument names.
+        self.assertEqual(set(args), {
+            "card_id", "skill", "status", "headline", "iter",
+            "fields", "sections", "artifact", "session_id",
+        })
+        self.assertEqual(args["card_id"], "deadbeef")
+        self.assertEqual(args["session_id"], "card-deadbeef")
+        self.assertEqual(args["iter"], 3)
+        # event_key is NOT sent — the MC server synthesizes it.
+        self.assertNotIn("event_key", args)
+        # Headers: bearer token + the streamable-HTTP Accept.
+        self.assertEqual(server.last_auth, "Bearer tok-abc")
+        self.assertIn("text/event-stream", server.last_accept)
+
+    def test_omitted_iter_defaults_to_1_on_both_legs(self):
+        # An omitted iter is normalized to 1 (the MC tool's default) BEFORE the
+        # transport split, so the MCP args carry iter=1 explicitly and the local
+        # event_key (the one a UDS fallback would send) is the byte-identical key
+        # the server synthesizes — a lost-response MCP write followed by the UDS
+        # fallback dedups instead of duplicating.
+        server = _FakeMcpServer(mode="ok")
+        self._set_mcp(server)
+        result = json.loads(
+            tools.report_progress({"skill": "ship", "status": "done", "headline": "Shipped"})
+        )
+        args = server.last_envelope["params"]["arguments"]
+        self.assertEqual(args["iter"], 1)
+        # Locally computed key == the server-side formula card-<id>:<skill>:<iter>:<status>.
+        server_key = f"card-{args['card_id']}:{args['skill']}:{args['iter']}:{args['status']}"
+        self.assertEqual(result["event_key"], server_key)
+        self.assertEqual(result["event_key"], "card-deadbeef:ship:1:done")
+
+    def test_explicit_iter_produces_identical_keys_on_both_legs(self):
+        server = _FakeMcpServer(mode="ok")
+        self._set_mcp(server)
+        result = json.loads(tools.report_progress(
+            {"skill": "build", "status": "done", "headline": "x", "iter": 4}
+        ))
+        args = server.last_envelope["params"]["arguments"]
+        server_key = f"card-{args['card_id']}:{args['skill']}:{args['iter']}:{args['status']}"
+        self.assertEqual(result["event_key"], server_key)
+        self.assertEqual(result["event_key"], "card-deadbeef:build:4:done")
+
+    def test_rpc_error_falls_back_to_uds(self):
+        # Older AIStackWorks without the tool → JSON-RPC error → UDS fallback.
+        server = _FakeMcpServer(mode="rpc_error")
+        self._set_mcp(server)
+        result = json.loads(tools.report_progress({
+            "skill": "build", "status": "done", "headline": "Build complete", "iter": 1,
+        }))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["transport"], "uds")
+        self.daemon._thread.join(timeout=2)
+        self.assertIsNotNone(self.daemon.captured)
+        sent = json.loads(self.daemon.captured)
+        # The UDS leg still carries the locally computed event_key.
+        self.assertEqual(sent["event_key"], "card-deadbeef:build:1:done")
+
+    def test_tool_error_falls_back_to_uds(self):
+        server = _FakeMcpServer(mode="tool_error")
+        self._set_mcp(server)
+        result = json.loads(tools.report_progress({
+            "skill": "build", "status": "done", "headline": "x", "iter": 1,
+        }))
+        self.assertEqual(result["transport"], "uds")
+        self.daemon._thread.join(timeout=2)
+        self.assertIsNotNone(self.daemon.captured)
+
+    def test_http_500_falls_back_to_uds(self):
+        server = _FakeMcpServer(mode="http_500")
+        self._set_mcp(server)
+        result = json.loads(tools.report_progress({
+            "skill": "build", "status": "done", "headline": "x", "iter": 1,
+        }))
+        self.assertEqual(result["transport"], "uds")
+        self.daemon._thread.join(timeout=2)
+        self.assertIsNotNone(self.daemon.captured)
+
+    def test_mcp_unreachable_falls_back_to_uds(self):
+        # A URL with no listener → connection refused → UDS fallback.
+        os.environ["MC_MCP_URL"] = "http://127.0.0.1:1/api/mcp/"
+        os.environ["MC_MCP_TOKEN"] = "tok-abc"
+        result = json.loads(tools.report_progress({
+            "skill": "build", "status": "done", "headline": "x", "iter": 1,
+        }))
+        self.assertEqual(result["transport"], "uds")
+        self.daemon._thread.join(timeout=2)
+        self.assertIsNotNone(self.daemon.captured)
+
+    def test_no_mcp_env_is_uds_only(self):
+        # Neither var set → behaves exactly as before (UDS only); MCP never tried.
+        os.environ.pop("MC_MCP_URL", None)
+        os.environ.pop("MC_MCP_TOKEN", None)
+        result = json.loads(tools.report_progress({
+            "skill": "build", "status": "done", "headline": "x", "iter": 1,
+        }))
+        self.assertEqual(result["transport"], "uds")
+        self.assertTrue(result["ok"])
+        self.daemon._thread.join(timeout=2)
+        self.assertIsNotNone(self.daemon.captured)
+
+    def test_partial_mcp_env_is_uds_only(self):
+        # Only the URL set (no token) → MCP not attempted; UDS only.
+        os.environ["MC_MCP_URL"] = "http://127.0.0.1:1/api/mcp/"
+        os.environ.pop("MC_MCP_TOKEN", None)
+        result = json.loads(tools.report_progress({
+            "skill": "build", "status": "done", "headline": "x", "iter": 1,
+        }))
+        self.assertEqual(result["transport"], "uds")
+        self.daemon._thread.join(timeout=2)
+        self.assertIsNotNone(self.daemon.captured)
+
+    def test_asset_upload_stays_on_uds_under_mcp(self):
+        # Even when the event goes over MCP, the asset still uploads over the UDS
+        # media leg and its hosted href is carried in the MCP event payload.
+        media_url = "/api/cards/deadbeef/videos/vid-1/"
+        routing_sock = os.path.join(self.tmp, "routing.sock")
+        routing = _RoutingDaemon(routing_sock, media_url)
+        tools._SOCK = routing_sock
+        self.addCleanup(routing.close)
+        server = _FakeMcpServer(mode="ok")
+        self._set_mcp(server)
+        asset = os.path.join(self.tmp, "clip.mp4")
+        with open(asset, "wb") as fh:
+            fh.write(b"\x00\x01mp4" * 64)
+        result = json.loads(tools.report_progress({
+            "skill": "demo", "status": "done", "headline": "Demo recorded",
+            "asset": asset, "artifact": {"kind": "demo", "label": "clip.mp4"},
+        }))
+        self.assertEqual(result["transport"], "mcp")
+        # Asset went over UDS media leg…
+        self.assertIn("/v1/agent-media", routing.bodies)
+        # …and the event (over MCP) points the artifact at the hosted URL.
+        args = server.last_envelope["params"]["arguments"]
+        self.assertEqual(args["artifact"]["href"], media_url)
 
 
 if __name__ == "__main__":

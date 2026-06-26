@@ -12,9 +12,12 @@ Two layers drive the card's timeline so AIStackWorks never goes blind on a stage
    by *returning a summary* (the dispatcher auto-completes the task) — they do NOT
    reliably call ``kanban_complete``. So the backstop fires on **session end**
    (``on_session_finalize`` / ``on_session_end``), the real "worker finished"
-   signal, and emits **every** mapped stage of the task (a coder task →
-   build/test/demo; a ship task → shipped) that the skill didn't report itself,
-   from the task's run record. The tool and the backstop run in the SAME process,
+   signal, and emits **every** mapped stage of the task (a multi-stage task →
+   each of build/test/demo with status ``done``; a ship task → ``ship/done``)
+   that the skill didn't report itself, from the task's run record. The
+   completion-status vocabulary is the kanban-execution one (build/test/demo/docs
+   → ``done``, review → ``passed``, ship → ``done``); ``blocked`` is emitted for a
+   worker that died or blocked. The tool and the backstop run in the SAME process,
    so ``tools.already_emitted`` is exact — the backstop fills only the genuine
    gaps (no double-post). Skipped if the task ended ``blocked``; a
    ``post_tool_call`` hook still catches an explicit ``kanban_block``.
@@ -28,14 +31,20 @@ from . import identity, schemas, tools
 
 logger = logging.getLogger(__name__)
 
-# Terminal success status AIStackWorks advances off, per skill. (reviewer has no
-# EVENT_STATUS_MAP entry by design, so it is intentionally absent.)
+# Terminal *completion* status AIStackWorks advances off, per stage skill — the
+# authoritative kanban-execution vocabulary (kanban-execution-contracts.md §2):
+# build/test/demo/docs complete with "done", review completes with "passed" (its
+# failure is "passed"→"failed", which the skill emits live — not a backstop
+# success), ship completes with "done". A worker that simply finished its task
+# emits its stage's completion status here; one that died/blocked emits "blocked"
+# (handled separately below, never as a success).
 SKILL_SUCCESS_STATUS: dict[str, str] = {
-    "refine": "awaiting_prd_review",
-    "build": "ready_for_test",
-    "test": "awaiting_demo",
-    "demo": "pass",
-    "ship": "shipped",
+    "build": "done",
+    "test": "done",
+    "demo": "done",
+    "review": "passed",
+    "docs": "done",
+    "ship": "done",
 }
 
 # Clean framing TITLE for the worker-exit (auto) event per terminal skill. The
@@ -44,6 +53,8 @@ _BACKSTOP_TITLE: dict[str, str] = {
     "build": "What was built",
     "test": "QA results",
     "demo": "What was done",
+    "review": "Review outcome",
+    "docs": "What was documented",
     "ship": "What shipped",
 }
 def _on_session_start(session_id="", **_kwargs) -> None:
@@ -169,17 +180,20 @@ def _rich_event(card_id: str, skill: str, status: str, run: dict) -> dict:
 def _task_stage_skills(meta: dict) -> list[str]:
     """Every AIStackWorks-advancing stage skill this finished task covers, in stage order.
 
-    A coder task carries ``skills=[build, test, demo]`` → all three; a ship task
-    has no skills list but a ``Ship:`` title → ``[ship]``; a reviewer task maps to
-    nothing (``review`` has no ``EVENT_STATUS_MAP`` entry by design)."""
+    A multi-stage task carries an explicit ``skills`` list (e.g.
+    ``[build, test, demo]``) → those, in order. A single-stage task (the
+    kanban-execution model seeds one task per stage) has no skills list but a
+    stage-prefixed title (``build:``/``test:``/``demo:``/``review:``/``docs:``/
+    ``ship:``) → that one stage."""
     skills = [s for s in (meta.get("skills") or []) if s in SKILL_SUCCESS_STATUS]
     if skills:
         return skills
-    # No skills list (ship/reviewer tasks) — infer from the title.
+    # No skills list — infer the single stage from the title prefix.
     title = (meta.get("title") or "").strip().lower()
-    if title.startswith("ship:") or "/ship" in title:
-        return ["ship"]
-    return []  # reviewer / unknown → not an AIStackWorks-advancing stage
+    for stage in SKILL_SUCCESS_STATUS:  # build/test/demo/review/docs/ship
+        if title.startswith(f"{stage}:") or f"/{stage}" in title:
+            return [stage]
+    return []  # unknown → not an AIStackWorks-advancing stage
 
 
 def _terminal_skill(meta: dict) -> str:

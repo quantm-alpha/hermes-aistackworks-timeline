@@ -9,8 +9,9 @@ REPORT_PROGRESS = {
     "name": "report_progress",
     "description": (
         "Post a milestone event to the current card's AIStackWorks timeline. "
-        "Call this at the end of a skill stage (refine/build/test/demo/ship) to "
-        "record durable progress for the human watching the card. Best-effort: a "
+        "Call this on pickup and at the end of a pipeline stage "
+        "(build/test/demo/review/docs/ship) to record durable progress for the "
+        "human watching the card. Best-effort: a "
         "failure here never blocks the skill. Pass the `card_id` from your task "
         "body so the event resolves to the right card — required when you run as "
         "a spawned Kanban task (coder/reviewer/ship), whose session id is not the "
@@ -30,17 +31,18 @@ REPORT_PROGRESS = {
             },
             "skill": {
                 "type": "string",
-                "enum": ["refine", "build", "test", "demo", "review", "ship", "docs"],
-                "description": "The skill stage this milestone belongs to.",
+                "enum": ["build", "test", "demo", "review", "docs", "ship"],
+                "description": "The pipeline stage this milestone belongs to.",
             },
             "status": {
                 "type": "string",
                 "description": (
-                    "Milestone status. This drives card workflow advancement in "
-                    "AIStackWorks, so use the exact value your skill prescribes "
-                    "(e.g. refine→'awaiting_prd_review', build→'ready_for_test', "
-                    "test→'awaiting_demo', demo→'pass', ship→'shipped'; 'blocked' "
-                    "for any blocker)."
+                    "Milestone status. The (skill, status) pair drives the card's "
+                    "board column in AIStackWorks, so use the exact value your "
+                    "stage prescribes: pickup is 'started'; build/test/demo/docs "
+                    "complete with 'done'; review completes with 'passed' (a "
+                    "failed review is 'failed', which re-drives the build); ship "
+                    "completes with 'done'; 'blocked' for any blocker."
                 ),
             },
             "headline": {
