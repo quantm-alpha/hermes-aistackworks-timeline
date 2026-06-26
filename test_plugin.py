@@ -966,7 +966,7 @@ class TranscriptUploadTests(unittest.TestCase):
         self.assertIn("/v1/agent-media", self.daemon.bodies)
         media_headers = self.daemon.headers["/v1/agent-media"]
         self.assertEqual(media_headers["x-card-id"], "cardX")
-        self.assertEqual(media_headers["x-event-key"], "card-cardX:build::ready_for_test")
+        self.assertEqual(media_headers["x-event-key"], "card-cardX:build:1:done")
         self.assertEqual(media_headers["x-media-kind"], "transcript")
         self.assertEqual(media_headers["x-filename"], "t_coder.log")
         self.assertEqual(self.daemon.bodies["/v1/agent-media"], b"terminal transcript from kanban log\n")
@@ -975,14 +975,14 @@ class TranscriptUploadTests(unittest.TestCase):
         identity.remember("t_coder")
         result = json.loads(
             tools.report_progress(
-                {"card_id": "cardX", "skill": "build", "status": "ready_for_test", "headline": "done"}
+                {"card_id": "cardX", "skill": "build", "status": "done", "headline": "done"}
             )
         )
         self.assertTrue(result["ok"], result)
         self.assertIn("/v1/agent-media", self.daemon.bodies)
         media_headers = self.daemon.headers["/v1/agent-media"]
         self.assertEqual(media_headers["x-media-kind"], "transcript")
-        self.assertEqual(media_headers["x-event-key"], "card-cardX:build::ready_for_test")
+        self.assertEqual(media_headers["x-event-key"], "card-cardX:build:1:done")
         self.assertEqual(media_headers["x-filename"], "t_coder.log")
         self.assertEqual(self.daemon.bodies["/v1/agent-media"], b"terminal transcript from kanban log\n")
 
@@ -999,7 +999,7 @@ class TranscriptUploadTests(unittest.TestCase):
         identity.remember("t_coder")
         result = json.loads(
             tools.report_progress(
-                {"card_id": "cardX", "skill": "build", "status": "ready_for_test", "headline": "done"}
+                {"card_id": "cardX", "skill": "build", "status": "done", "headline": "done"}
             )
         )
         self.assertTrue(result["ok"], result)
@@ -1012,7 +1012,7 @@ class TranscriptUploadTests(unittest.TestCase):
             identity.remember("t_coder")
             result = json.loads(
                 tools.report_progress(
-                    {"card_id": "cardX", "skill": "build", "status": "ready_for_test", "headline": "done"}
+                    {"card_id": "cardX", "skill": "build", "status": "done", "headline": "done"}
                 )
             )
         finally:

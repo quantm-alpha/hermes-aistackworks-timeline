@@ -160,12 +160,12 @@ def _sanitize_fields(fields):
 
 
 _TRANSCRIPT_MAX_BYTES = int(os.environ.get("AISTACKWORKS_TRANSCRIPT_MAX_BYTES", str(5 * 1024 * 1024)))
+# Terminal stage-result statuses whose rendered task log is worth capturing.
+# Mirrors the pipeline's stage-success vocabulary (__init__.SKILL_SUCCESS_STATUS:
+# build/test/demo/docs/ship → "done", review → "passed") plus "blocked".
 _TRANSCRIPT_TERMINAL_STATUSES = {
-    "awaiting_prd_review",
-    "ready_for_test",
-    "awaiting_demo",
-    "pass",
-    "shipped",
+    "done",
+    "passed",
     "blocked",
 }
 
