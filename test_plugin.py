@@ -18,6 +18,12 @@ import tempfile
 import threading
 import unittest
 
+# Keep standalone plugin tests hermetic when run from inside a live Hermes Kanban
+# worker: the production plugin intentionally reads these env vars, but fixture
+# sessions like "card-deadbeef" should not be overridden by the caller's task.
+for _external_env in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_HOME", "HERMES_HOME"):
+    os.environ.pop(_external_env, None)
+
 # The plugin uses package-relative imports (how Hermes loads it). The directory
 # name has a hyphen, so register a synthetic package pointing at this dir to make
 # those relative imports resolve when running the tests standalone.
